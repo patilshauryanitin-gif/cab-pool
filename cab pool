@@ -1,0 +1,363 @@
+"""Cab Pool Matcher - SUTT Backend Recruitment Task."""
+
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from pathlib import Path
+import heapq
+import json
+import sys
+
+
+BASE_DIR = Path(__file__).resolve().parent
+CABS_FILE = BASE_DIR / "cabs.json"
+SAVE_FILE = BASE_DIR / "saved_state.json"
+
+DESTINATIONS = ("Delhi", "Jaipur")
+TIME_SLOTS = ("Morning", "Afternoon", "Evening", "Night")
+
+
+@dataclass
+class RideRequest:
+    name: str
+    destination: str
+    time_slot: str
+    year: int
+    submitted_at: str
+    sequence: int
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            name=data["name"],
+            destination=data["destination"],
+            time_slot=data["time_slot"],
+            year=int(data["year"]),
+            submitted_at=data["submitted_at"],
+            sequence=int(data["sequence"]),
+        )
+
+
+@dataclass
+class Cab:
+    cab_id: str
+    driver: str
+    seats: int
+    destination: str
+    time_slot: str
+    has_left: bool = False
+    passengers: list = None
+
+    def __post_init__(self):
+        if self.passengers is None:
+            self.passengers = []
+
+
+class CabPoolMatcher:
+    """Stores requests in one stable priority queue for each trip."""
+
+    def __init__(self):
+        self.cabs = self.load_cabs()
+        self.queues = {}
+        self.next_sequence = 1
+        self.rebuild_queues()
+
+    @staticmethod
+    def trip_key(destination, time_slot):
+        return (destination, time_slot)
+
+    def load_cabs(self):
+        try:
+            with CABS_FILE.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+            cabs = []
+            for item in data:
+                seats = int(item["seats"])
+                if not 1 <= seats <= 4:
+                    raise ValueError("Each cab must have between 1 and 4 seats.")
+                if item["destination"] not in DESTINATIONS:
+                    raise ValueError("A cab has an unsupported destination.")
+                if item["time_slot"] not in TIME_SLOTS:
+                    raise ValueError("A cab has an unsupported time slot.")
+                cabs.append(Cab(
+                    cab_id=str(item["cab_id"]),
+                    driver=item["driver"],
+                    seats=seats,
+                    destination=item["destination"],
+                    time_slot=item["time_slot"],
+                ))
+            if not cabs:
+                raise ValueError("The cab file is empty.")
+            return cabs
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            print(f"Could not load cabs.json ({error}). Please check the sample cab file.")
+            print("Starting with no cabs.")
+            return []
+
+    @staticmethod
+    def priority_entry(request):
+        # Smaller heap values come first: higher year, then earlier request.
+        return (-request.year, request.sequence, request)
+
+    def rebuild_queues(self):
+        self.queues = {}
+        for cab in self.cabs:
+            self.queues.setdefault(self.trip_key(cab.destination, cab.time_slot), [])
+        self.next_sequence = 1
+
+    def add_request(self, name, destination, time_slot, year):
+        if not name.strip():
+            raise ValueError("Student name cannot be empty.")
+        if destination not in DESTINATIONS:
+            raise ValueError("Please choose Delhi or Jaipur.")
+        if time_slot not in TIME_SLOTS:
+            raise ValueError("Please choose Morning, Afternoon, Evening or Night.")
+        if not 1 <= year <= 5:
+            raise ValueError("Year must be between 1 and 5.")
+
+        request = RideRequest(
+            name=name.strip(),
+            destination=destination,
+            time_slot=time_slot,
+            year=year,
+            submitted_at=datetime.now().isoformat(timespec="seconds"),
+            sequence=self.next_sequence,
+        )
+        self.next_sequence += 1
+        key = self.trip_key(destination, time_slot)
+        self.queues.setdefault(key, [])
+        heapq.heappush(self.queues[key], self.priority_entry(request))
+        return request
+
+    def waiting_requests(self, destination=None, time_slot=None):
+        requests = []
+        for (trip_destination, trip_time), heap in self.queues.items():
+            if destination and trip_destination != destination:
+                continue
+            if time_slot and trip_time != time_slot:
+                continue
+            requests.extend(entry[2] for entry in heap)
+        return sorted(requests, key=lambda r: (-r.year, r.sequence))
+
+    def open_cabs(self, destination=None, time_slot=None):
+        return [
+            cab for cab in self.cabs
+            if not cab.has_left
+            and (destination is None or cab.destination == destination)
+            and (time_slot is None or cab.time_slot == time_slot)
+        ]
+
+    def find_matches(self):
+        print("\nMATCH PREVIEW (no seats are reserved)")
+        found = False
+        for cab in self.cabs:  # Keep the same order as cabs.json.
+            if cab.has_left:
+                continue
+            key = self.trip_key(cab.destination, cab.time_slot)
+            heap = self.queues.get(key, [])
+            selected = heapq.nsmallest(cab.seats, heap)
+            students = [entry[2] for entry in selected]
+            found = True
+            print(f"\nCab {cab.cab_id} | {cab.driver} | {cab.destination}, {cab.time_slot}")
+            if students:
+                for student in students:
+                    print(f"  - {student.name} (Year {student.year})")
+            else:
+                print("  No students waiting for this trip.")
+        if not found:
+            print("There are no open cabs.")
+
+    def dispatch(self, destination, time_slot, chosen_cab=None):
+        candidates = self.open_cabs(destination, time_slot)
+        if chosen_cab is not None:
+            candidates = [cab for cab in candidates if cab.cab_id == chosen_cab]
+        if not candidates:
+            print("No open cab is available for that trip. Requests will remain waiting.")
+            return False
+
+        cab = candidates[0]
+        key = self.trip_key(destination, time_slot)
+        heap = self.queues.get(key, [])
+        if not heap:
+            print("Nobody is waiting for this trip. The cab has not been changed.")
+            return False
+
+        number_to_take = min(cab.seats, len(heap))
+        cab.passengers = []
+        for _ in range(number_to_take):
+            _, _, request = heapq.heappop(heap)
+            cab.passengers.append(asdict(request))
+        cab.has_left = True
+
+        print(f"\nCab {cab.cab_id} ({cab.driver}) has been dispatched.")
+        print(f"Passengers: {len(cab.passengers)}/{cab.seats}")
+        for passenger in cab.passengers:
+            print(f"  - {passenger['name']} (Year {passenger['year']})")
+        return True
+
+    def show_everything(self):
+        print("\nWAITING STUDENTS")
+        waiting = self.waiting_requests()
+        if not waiting:
+            print("Nobody is waiting.")
+        else:
+            for student in waiting:
+                print(
+                    f"- {student.name} | {student.destination}, {student.time_slot} "
+                    f"| Year {student.year} | Requested {student.submitted_at}"
+                )
+
+        print("\nCABS")
+        if not self.cabs:
+            print("No cabs are configured.")
+        for cab in self.cabs:
+            status = "Left" if cab.has_left else "Open"
+            print(
+                f"Cab {cab.cab_id} | Driver: {cab.driver} | "
+                f"{cab.destination}, {cab.time_slot} | "
+                f"{len(cab.passengers)}/{cab.seats} seats | {status}"
+            )
+            for passenger in cab.passengers:
+                print(f"    - {passenger['name']} (Year {passenger['year']})")
+
+    def save_state(self):
+        data = {
+            "next_sequence": self.next_sequence,
+            "waiting": [
+                asdict(request) for request in self.waiting_requests()
+            ],
+            "cabs": [
+                {
+                    "cab_id": cab.cab_id,
+                    "has_left": cab.has_left,
+                    "passengers": cab.passengers,
+                }
+                for cab in self.cabs
+            ],
+        }
+        temporary_file = SAVE_FILE.with_suffix(".tmp")
+        with temporary_file.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=4)
+        temporary_file.replace(SAVE_FILE)
+
+    def load_state(self):
+        if not SAVE_FILE.exists():
+            print("No saved state found. Starting a fresh session.")
+            return
+        try:
+            with SAVE_FILE.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            saved_cabs = {item["cab_id"]: item for item in data["cabs"]}
+            for cab in self.cabs:
+                saved = saved_cabs.get(cab.cab_id)
+                if saved:
+                    cab.has_left = bool(saved["has_left"])
+                    cab.passengers = saved["passengers"]
+
+            self.queues = {}
+            for item in data["waiting"]:
+                request = RideRequest.from_dict(item)
+                key = self.trip_key(request.destination, request.time_slot)
+                self.queues.setdefault(key, [])
+                heapq.heappush(self.queues[key], self.priority_entry(request))
+            self.next_sequence = max(
+                int(data["next_sequence"]),
+                max((r.sequence for r in self.waiting_requests()), default=0) + 1,
+            )
+            print("Previous session restored successfully.")
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            self.queues = {}
+            self.next_sequence = 1
+            for cab in self.cabs:
+                cab.has_left = False
+                cab.passengers = []
+            print(f"Saved state is missing required data or is damaged ({error}).")
+            print("Starting a fresh session instead.")
+
+
+def read_choice(prompt, allowed):
+    value = input(prompt).strip()
+    if value not in allowed:
+        raise ValueError(f"Please enter one of: {', '.join(allowed)}.")
+    return value
+
+
+def add_request_menu(app):
+    name = input("Student name: ").strip()
+    destination = read_choice(
+        "Destination (Delhi/Jaipur): ", list(DESTINATIONS)
+    )
+    time_slot = read_choice(
+        "Time (Morning/Afternoon/Evening/Night): ", list(TIME_SLOTS)
+    )
+    year_text = input("Year (1-5): ").strip()
+    if not year_text.isdigit():
+        raise ValueError("Year must be a number from 1 to 5.")
+    request = app.add_request(name, destination, time_slot, int(year_text))
+    print(f"Request added for {request.name}. It is in the waiting queue.")
+
+
+def dispatch_menu(app, specific_cab=False):
+    destination = read_choice(
+        "Destination (Delhi/Jaipur): ", list(DESTINATIONS)
+    )
+    time_slot = read_choice(
+        "Time (Morning/Afternoon/Evening/Night): ", list(TIME_SLOTS)
+    )
+    cab_id = None
+    if specific_cab:
+        matching = app.open_cabs(destination, time_slot)
+        if not matching:
+            print("No open cab is available for that trip.")
+            return
+        print("Open cabs:", ", ".join(c.cab_id for c in matching))
+        cab_id = input("Enter cab ID: ").strip()
+        if cab_id not in [c.cab_id for c in matching]:
+            raise ValueError("That is not an open cab for the selected trip.")
+    app.dispatch(destination, time_slot, cab_id)
+
+
+def main():
+    app = CabPoolMatcher()
+    app.load_state()
+
+    while True:
+        print("\n========== CAB POOL MATCHER ==========")
+        print("1. Add a ride request")
+        print("2. View waiting students and all cabs")
+        print("3. Find matches (preview only)")
+        print("4. Dispatch a cab for a destination and time")
+        print("5. Dispatch a specific open cab")
+        print("6. Quit")
+
+        try:
+            choice = input("Choose an option (1-6): ").strip()
+            if choice == "1":
+                add_request_menu(app)
+                app.save_state()
+            elif choice == "2":
+                app.show_everything()
+            elif choice == "3":
+                app.find_matches()
+            elif choice == "4":
+                dispatch_menu(app)
+                app.save_state()
+            elif choice == "5":
+                dispatch_menu(app, specific_cab=True)
+                app.save_state()
+            elif choice == "6":
+                app.save_state()
+                print("Your data has been saved. Goodbye!")
+                break
+            else:
+                print("Please enter a number from 1 to 6.")
+        except ValueError as error:
+            print(f"Input error: {error}")
+        except (EOFError, KeyboardInterrupt):
+            app.save_state()
+            print("\nYour data has been saved. Goodbye!")
+            break
+
+
+if __name__ == "__main__":
+    main()
