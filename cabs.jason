@@ -1,0 +1,8 @@
+[
+  {"cab_id": "C1", "driver": "Ramesh", "seats": 4, "destination": "Delhi",  "time_slot": "Morning"},
+  {"cab_id": "C2", "driver": "Suresh", "seats": 3, "destination": "Delhi",  "time_slot": "Morning"},
+  {"cab_id": "C3", "driver": "Mahesh", "seats": 4, "destination": "Delhi",  "time_slot": "Evening"},
+  {"cab_id": "C4", "driver": "Dinesh", "seats": 2, "destination": "Jaipur", "time_slot": "Afternoon"},
+  {"cab_id": "C5", "driver": "Naresh", "seats": 4, "destination": "Jaipur", "time_slot": "Night"},
+  {"cab_id": "C6", "driver": "Rajesh", "seats": 1, "destination": "Jaipur", "time_slot": "Night"}
+]
